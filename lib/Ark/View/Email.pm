@@ -3,65 +3,99 @@ package Ark::View::Email;
 use Ark 'View';
 our $VERSION = '0.01';
 
-has email_mime => (
-    is => 'rw',
-    isa => 'Object',
-    lazy => 1,
-    
+__PACKAGE__->config(
+    stash_key   => 'email',
+    default     => {
+        content_type    => 'text/plain',
+    },
 );
 
-has header => (
-    is => 'rw',
-    isa => 'HashRef',
+has sender_def => (
+    is   => 'rw',
+    isa  => 'ArrayRef',
     lazy => 1,
+    default => sub {
+        my $self = shift;
+        my @sender = ();
+        if (my $sender = $self->{sender}->{mailer}) {
+            push (@sender, $sender);
+        }
+        my @def_sender = qw/SMTP Sendmail Qmail/;
+        push (@sender, @def_sender);
+    }
+);
+
+has mailer => (
+    is   => 'rw',
+    isa  => 'Object',
+    lazy => 1,
+    default => sub{
+        my ($self, $mailer) = @_;
+        
+        $self->ensure_class_loaded("Email::Send");
+        Email::Send->import;
+        my $sender = Email::Send->new;
+        my $def;
+        for $def ( @{$self->sender_def} ) {
+            last if $sender->mailer_available($def);
+        }
+        $sender->mailer($def);
+    }
+);
+
+has mime => (
+    is      => 'rw',
+    isa     => 'HashRef',
+    lazy    => 1,
     default => [],
 );
 
 has email => (
-    is => 'rw',
-    isa => 'HashRef',
+    is      => 'rw',
+    isa     => 'HashRef',
+    lazy    => 1,
     default => [],
-    trigger => sub {
- 
-    }
 )
+
+sub Build {
+    my $self = shift;
+
+    if ( my $args = $self->{sender}->{mailer_args} ) {
+        if ( ref $args eq 'HASH' ) {
+            $self->mailer->mailer_args([ %$args ]);
+        }
+        elsif ( ref $args eq 'ARRAY' ) {
+            $self->mailer->mailer_args($args);
+        } else {
+            croak "Invalid mailer_args specified, check pod for Email::Send!";
+        }
+    }
+    $self->mailer($sender);
+
+    return $self;
+}
 
 sub process {
     my ( $self, $c ) = @_;
 
-    croak "Unable to send mail, bad mail configuration"
-      unless $self->mailer;
-
+    croak "Unable to send mail, bad mail configuration" unless $self->mailer;
     my $email = $c->stash->{ $self->{stash_key} };
-    croak "Can't send email without a valid email structure"
-      unless $email;
-    $self->email($email);
+    croak "Can't send email without a valid email structure" unless $email;
 
     # Default content type
     if ( exists $self->{content_type} and not $email->{content_type} ) {
-        $self->email->{content_type} = $self->{content_type};
+        $email->{content_type} = $self->{content_type};
     }
 
     my $header = $email->{header} || [];
-    if ( defined $email->{to} ) {
-        push( @{$self->header}, ( 'To' => delete $email->{to} ) );
-    }
-    if ( defined $email->{cc} ) {
-        push( @$header, ( 'Cc' => delete $email->{cc} ) );
-    }
-    if ( defined $email->{bcc} ) {
-        push( @$header, ( 'Bcc' => delete $email->{bcc} ) );
-    }
-    if ( defined $email->{from} ) {
-        push( @$header, ( 'From' => delete $email->{from} ) );
-    }
+    push( @$header, ( 'To'   => delete $email->{to} ) )   if $email->{to};
+    push( @$header, ( 'Cc'   => delete $email->{cc} ) )   if $email->{cc};
+    push( @$header, ( 'Bcc'  => delete $email->{bcc} ) )  if $email->{bcc};
+    push( @$header, ( 'From' => delete $email->{from} ) ) if $email->{from};
     my $subject = Encode::encode( 'MIME-Header', delete $email->{subject} );
-    if ( defined $email->{subject} ) {
-        push( @$header, ( 'Subject' => $subject ) );
-    }
-    if ( defined $email->{content_type} ) {
-        push( @$header, ( 'Content-type' => $email->{content_type} ) );
-    }
+    push( @$header, ( 'Subject' => $subject ) ) if $email->{subject};
+    push( @$header, ( 'Content-type' => $email->{content_type} ) )
+      if $email->{content_type};
 
     my $parts = $email->{parts};
     my $body  = $email->{body};
@@ -71,7 +105,6 @@ sub process {
     }
 
     my %mime = ( header => $header, attributes => {} );
-
     if ( $parts and ref $parts eq 'ARRAY' ) {
         $mime{parts} = $parts;
     }
@@ -90,10 +123,8 @@ sub process {
     }
 
     my $message = $self->generate_message( $c, \%mime );
-
     if ($message) {
         my $return = $self->mailer->send($message);
-
         # return is a Return::Value object, so this will stringify as the error
         # in the case of a failure.
         croak "$return" unless $return;
@@ -103,11 +134,38 @@ sub process {
     }
 }
 
+sub setup_attributes {
+    my ( $self, $c, $attrs ) = @_;
+    
+    my $def_content_type    = $self->{default}->{content_type};
+    my $def_charset         = $self->{default}->{charset};
+
+    my $e_m_attrs = {};
+
+    if (exists $attrs->{content_type} && defined $attrs->{content_type} && $attrs->{content_type} ne '') {
+        $c->log->debug('Ark::View::Email uses specified content_type ' . $attrs->{content_type} . '.') if $c->debug;
+        $e_m_attrs->{content_type} = $attrs->{content_type};
+    }
+    elsif (defined $def_content_type && $def_content_type ne '') {
+        $c->log->debug("Ark::View::Email uses default content_type $def_content_type.") if $c->debug;
+        $e_m_attrs->{content_type} = $def_content_type;
+    }
+   
+    if (exists $attrs->{charset} && defined $attrs->{charset} && $attrs->{charset} ne '') {
+        $e_m_attrs->{charset} = $attrs->{charset};
+    }
+    elsif (defined $def_charset && $def_charset ne '') {
+        $e_m_attrs->{charset} = $def_charset;
+    }
+
+    return $e_m_attrs;
+}
+
 sub generate_message {
     my ( $self, $c, $attr ) = @_;
 
     # setup the attributes (merge with defaults)
-    $attr->{attributes} = $self->setup_attributes($c, $attr->{attributes});
+    $attr->{attributes} = $self->setup_attributes( $c, $attr->{attributes} );
     return Email::MIME->create(%$attr);
 }
 
@@ -116,11 +174,12 @@ __END__
 
 =head1 NAME
 
-Ark::View::Email -
+Ark::View::Email - Email view class
 
 =head1 SYNOPSIS
 
   use Ark::View::Email;
+
 
 =head1 DESCRIPTION
 
