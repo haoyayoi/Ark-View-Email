@@ -71,7 +71,6 @@ sub Build {
         }
     }
     $self->mailer($sender);
-
     return $self;
 }
 
