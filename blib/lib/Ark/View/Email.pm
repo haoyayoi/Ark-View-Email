@@ -3,34 +3,16 @@ package Ark::View::Email;
 use Ark 'View';
 our $VERSION = '0.01';
 
-has stash_key => (
-    is   => 'rw',
-    isa  => 'Str',
-    default => 'email',
+__PACKAGE__->config(
+    stash_key   => 'email',
+    default     => {
+        content_type    => 'text/plain',
+    },
 );
 
-has content_type => (
+has mailer => (
     is   => 'rw',
-    isa  => 'Str',
-    default => 'text/plain',
-);
-
-has charset => (
-    is      => 'rw',
-    isa     => 'Str',
-    default => 'iso-8859-2',
-);
-
-has sender => (
-    is   => 'rw',
-    isa  => 'Object',
-    lazy => 1,
-    default => sub{
-        my $self = shift;
-        
-        $self->ensure_class_loaded("Email::Sender::Simple");
-        Email::Sender::Simple->import;
-    }
+    isa  => 'Email::Send',
 );
 
 has mime => (
@@ -49,18 +31,29 @@ has email => (
 
 sub Build {
     my $self = shift;
+    my $sender = Email::Send->new;
+    if ( my $mailer = $self->{sender}->{mailer} ) {
+        croak "$mailer is not supported, see Email::Send"
+            unless $sender->mailer_available($mailer);
+        $sender->mailer($mailer);
+    } else {
+        for ( qw/SMTP Sendmail Qmail/ ) {
+            $sender->mailer($_) and last if $sender->mailer_available($_);
+        }
+    }
 
     if ( my $args = $self->{sender}->{mailer_args} ) {
         if ( ref $args eq 'HASH' ) {
-            $self->mailer->mailer_args([ %$args ]);
+            $sender->mailer_args([ %$args ]);
         }
         elsif ( ref $args eq 'ARRAY' ) {
-            $self->mailer->mailer_args($args);
+            $sender->mailer_args($args);
         } else {
-            croak "Invalid mailer_args specified, check pod for Email::Sender!";
+            croak "Invalid mailer_args specified, check pod for Email::Send!";
         }
     }
     $self->mailer($sender);
+
     return $self;
 }
 
@@ -68,12 +61,12 @@ sub process {
     my ( $self, $c ) = @_;
 
     croak "Unable to send mail, bad mail configuration" unless $self->mailer;
-    my $email = $c->stash->{ $self->stash_key };
+    my $email = $c->stash->{ $self->{stash_key} };
     croak "Can't send email without a valid email structure" unless $email;
 
     # Default content type
-    if ( not $email->{content_type} ) {
-        $email->{content_type} = $self->content_type;
+    if ( exists $self->{content_type} and not $email->{content_type} ) {
+        $email->{content_type} = $self->{content_type};
     }
 
     my $header = $email->{header} || [];
@@ -108,7 +101,7 @@ sub process {
         && not $mime{attributes}->{charset}
         && $self->{default}->{charset} )
     {
-        $mime{attributes}->{charset} = $self->charset;
+        $mime{attributes}->{charset} = $self->{default}->{charset};
     }
 
     my $message = $self->generate_message( $c, \%mime );
@@ -126,25 +119,25 @@ sub process {
 sub setup_attributes {
     my ( $self, $c, $attrs ) = @_;
     
-    my $content_type    = $self->content_type;
-    my $charset         = $self->charset;
+    my $def_content_type    = $self->{default}->{content_type};
+    my $def_charset         = $self->{default}->{charset};
 
     my $e_m_attrs = {};
 
     if (exists $attrs->{content_type} && defined $attrs->{content_type} && $attrs->{content_type} ne '') {
-        $c->log->debug('Ark::View::Email uses specified content_type ' . $attrs->{content_type} . '.') if $c->debug;
+        $c->log->debug('A::V::Email uses specified content_type ' . $attrs->{content_type} . '.') if $c->debug;
         $e_m_attrs->{content_type} = $attrs->{content_type};
     }
-    else {
-        $c->log->debug("Ark::View::Email uses default content_type $def_content_type.") if $c->debug;
-        $e_m_attrs->{content_type} = $content_type;
+    elsif (defined $def_content_type && $def_content_type ne '') {
+        $c->log->debug("A::V::Email uses default content_type $def_content_type.") if $c->debug;
+        $e_m_attrs->{content_type} = $def_content_type;
     }
    
     if (exists $attrs->{charset} && defined $attrs->{charset} && $attrs->{charset} ne '') {
         $e_m_attrs->{charset} = $attrs->{charset};
     }
-    elsif {
-        $e_m_attrs->{charset} = $charset;
+    elsif (defined $def_charset && $def_charset ne '') {
+        $e_m_attrs->{charset} = $def_charset;
     }
 
     return $e_m_attrs;
@@ -163,12 +156,11 @@ __END__
 
 =head1 NAME
 
-Ark::View::Email - Email view class
+Ark::View::Email -
 
 =head1 SYNOPSIS
 
   use Ark::View::Email;
-
 
 =head1 DESCRIPTION
 
