@@ -1,6 +1,6 @@
 package Ark::View::Email;
-
 use Ark 'View';
+
 our $VERSION = '0.01';
 
 has stash_key => (
